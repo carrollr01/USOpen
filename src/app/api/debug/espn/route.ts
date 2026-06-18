@@ -11,65 +11,56 @@ const HEADERS = {
   Referer: "https://www.espn.com/golf/leaderboard",
 };
 
-const CANDIDATES = [
-  "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
-  "https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard",
-  "https://site.web.api.espn.com/apis/v2/sports/golf/pga/scoreboard",
-  "https://site.web.api.espn.com/apis/v2/sports/golf/leaderboard",
-];
-
-function trimCompetitor(c: any) {
-  return {
-    keys: c ? Object.keys(c) : [],
-    id: c?.id,
-    athlete: c?.athlete ? { id: c.athlete.id, displayName: c.athlete.displayName } : undefined,
-    score: c?.score,
-    statusKeys: c?.status ? Object.keys(c.status) : [],
-    status: c?.status,
-    statistics: c?.statistics,
-    linescores: c?.linescores,
-  };
+async function getJson(url: string) {
+  const res = await fetch(url, { headers: HEADERS, cache: "no-store" });
+  if (!res.ok) return { url, status: res.status };
+  return { url, status: 200, data: await res.json() };
 }
 
-// Probe ESPN golf endpoints to find the right one and inspect the JSON shape.
-// /api/debug/espn?key=<AUTH_SECRET>           -> probes all candidates
-// /api/debug/espn?key=...&url=<espn url>      -> probes one URL, full sample
+// Inspect scoreboard + summary shapes to wire the parser correctly.
 export async function GET(req: NextRequest) {
   const params = new URL(req.url).searchParams;
   if (params.get("key") !== authSecret()) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const override = params.get("url");
-  const urls = override && /^https:\/\/[^/]*espn\.com\//.test(override) ? [override] : CANDIDATES;
+  const sb = await getJson(
+    "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
+  );
+  const event = (sb as any)?.data?.events?.[0];
+  const eventId = event?.id;
+  const comp = event?.competitions?.[0];
+  const sbCompetitor = comp?.competitors?.[0];
 
-  const results: any[] = [];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers: HEADERS, cache: "no-store" });
-      const ok = res.ok;
-      let info: any = { url, status: res.status };
-      if (ok) {
-        const data: any = await res.json();
-        const event = data?.events?.[0];
-        const comp = event?.competitions?.[0];
-        const competitors: any[] = comp?.competitors ?? [];
-        info = {
-          ...info,
-          topKeys: Object.keys(data ?? {}),
-          eventName: event?.name,
-          eventShort: event?.shortName,
-          competitionStatus: comp?.status,
-          competitorCount: competitors.length,
-          sample: competitors.slice(0, 3).map(trimCompetitor),
-        };
-      }
-      results.push(info);
-      if (ok && !override) break; // first working candidate is enough
-    } catch (err) {
-      results.push({ url, error: err instanceof Error ? err.message : "fetch failed" });
-    }
+  let summary: any = { skipped: true };
+  if (eventId) {
+    const sm = await getJson(
+      `https://site.api.espn.com/apis/site/v2/sports/golf/pga/summary?event=${eventId}`,
+    );
+    const data = (sm as any)?.data;
+    // Try to locate the leaderboard competitors in the summary payload.
+    const lbCompetitors =
+      data?.leaderboard?.[0]?.players ??
+      data?.competitions?.[0]?.competitors ??
+      data?.leaderboard?.competitors ??
+      null;
+    summary = {
+      status: (sm as any)?.status,
+      topKeys: data ? Object.keys(data) : [],
+      hasLeaderboard: Boolean(data?.leaderboard),
+      leaderboardKeys: data?.leaderboard
+        ? Array.isArray(data.leaderboard)
+          ? `array[${data.leaderboard.length}] keys=${Object.keys(data.leaderboard[0] ?? {}).join(",")}`
+          : Object.keys(data.leaderboard)
+        : null,
+      competitorSample: Array.isArray(lbCompetitors) ? lbCompetitors.slice(0, 2) : null,
+    };
   }
 
-  return NextResponse.json({ results });
+  return NextResponse.json({
+    eventId,
+    eventName: event?.name,
+    scoreboardCompetitor: sbCompetitor,
+    summary,
+  });
 }
