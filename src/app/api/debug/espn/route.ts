@@ -11,56 +11,36 @@ const HEADERS = {
   Referer: "https://www.espn.com/golf/leaderboard",
 };
 
-async function getJson(url: string) {
-  const res = await fetch(url, { headers: HEADERS, cache: "no-store" });
-  if (!res.ok) return { url, status: res.status };
-  return { url, status: 200, data: await res.json() };
+async function probe(url: string) {
+  try {
+    const res = await fetch(url, { headers: HEADERS, cache: "no-store" });
+    if (!res.ok) return { url, status: res.status };
+    const text = await res.text();
+    let topKeys: string[] = [];
+    try {
+      topKeys = Object.keys(JSON.parse(text));
+    } catch {
+      /* ignore */
+    }
+    return { url, status: 200, topKeys, length: text.length, snippet: text.slice(0, 3500) };
+  } catch (err) {
+    return { url, error: err instanceof Error ? err.message : "fetch failed" };
+  }
 }
 
-// Inspect scoreboard + summary shapes to wire the parser correctly.
 export async function GET(req: NextRequest) {
   const params = new URL(req.url).searchParams;
   if (params.get("key") !== authSecret()) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
-
-  const sb = await getJson(
-    "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
-  );
-  const event = (sb as any)?.data?.events?.[0];
-  const eventId = event?.id;
-  const comp = event?.competitions?.[0];
-  const sbCompetitor = comp?.competitors?.[0];
-
-  let summary: any = { skipped: true };
-  if (eventId) {
-    const sm = await getJson(
-      `https://site.api.espn.com/apis/site/v2/sports/golf/pga/summary?event=${eventId}`,
-    );
-    const data = (sm as any)?.data;
-    // Try to locate the leaderboard competitors in the summary payload.
-    const lbCompetitors =
-      data?.leaderboard?.[0]?.players ??
-      data?.competitions?.[0]?.competitors ??
-      data?.leaderboard?.competitors ??
-      null;
-    summary = {
-      status: (sm as any)?.status,
-      topKeys: data ? Object.keys(data) : [],
-      hasLeaderboard: Boolean(data?.leaderboard),
-      leaderboardKeys: data?.leaderboard
-        ? Array.isArray(data.leaderboard)
-          ? `array[${data.leaderboard.length}] keys=${Object.keys(data.leaderboard[0] ?? {}).join(",")}`
-          : Object.keys(data.leaderboard)
-        : null,
-      competitorSample: Array.isArray(lbCompetitors) ? lbCompetitors.slice(0, 2) : null,
-    };
-  }
-
-  return NextResponse.json({
-    eventId,
-    eventName: event?.name,
-    scoreboardCompetitor: sbCompetitor,
-    summary,
-  });
+  const override = params.get("url");
+  const targets = override
+    ? [override]
+    : [
+        "https://cdn.espn.com/core/golf/leaderboard?xhr=1",
+        "https://site.api.espn.com/apis/site/v2/sports/golf/pga/summary?event=401811952",
+      ];
+  const results = [];
+  for (const t of targets) results.push(await probe(t));
+  return NextResponse.json({ results });
 }
