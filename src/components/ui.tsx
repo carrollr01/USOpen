@@ -104,25 +104,25 @@ export function UpdatedBar({
     ? new Date(updatedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
     : "—";
   return (
-    <div className="flex items-center justify-between gap-3 text-xs text-gray-500">
-      <div className="flex items-center gap-2">
+    <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
+      <div className="flex min-w-0 items-center gap-2">
         <span
-          className={`inline-block h-2 w-2 rounded-full ${
+          className={`inline-block h-2 w-2 shrink-0 rounded-full ${
             source === "live" ? "bg-green-500" : "bg-gray-300"
           }`}
         />
-        <span className="font-medium text-gray-600">
+        <span className="truncate font-medium text-gray-600">
           {source === "live" ? detail || "Live" : "Live scores unavailable"}
         </span>
-        <span className="text-gray-300">·</span>
-        <span>Updated {time}</span>
+        <span className="shrink-0 text-gray-300">·</span>
+        <span className="shrink-0 whitespace-nowrap">{time}</span>
       </div>
       <button
         onClick={onRefresh}
         disabled={refreshing}
-        className="rounded-md border border-gray-200 bg-white px-2.5 py-1 font-medium text-gray-600 transition hover:bg-gray-50 disabled:opacity-50"
+        className="shrink-0 rounded-md border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-600 transition hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50"
       >
-        {refreshing ? "Refreshing…" : "Refresh"}
+        {refreshing ? "…" : "Refresh"}
       </button>
     </div>
   );

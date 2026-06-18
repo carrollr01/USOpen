@@ -52,7 +52,7 @@ export function LeagueView({ me }: { me: string }) {
               <div key={s.username}>
                 <button
                   onClick={() => setOpen(expanded ? null : s.username)}
-                  className={`flex w-full items-center justify-between px-3 py-3 text-left transition hover:bg-gray-50 ${
+                  className={`flex w-full items-center justify-between px-3 py-3 text-left transition hover:bg-gray-50 active:bg-gray-100 ${
                     mine ? "bg-green-50/60" : ""
                   }`}
                 >

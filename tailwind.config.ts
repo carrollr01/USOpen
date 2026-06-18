@@ -2,6 +2,8 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
+  // Don't let hover styles "stick" after a tap on touch devices.
+  future: { hoverOnlyWhenSupported: true },
   theme: {
     extend: {
       colors: {

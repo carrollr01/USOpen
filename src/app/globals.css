@@ -6,11 +6,27 @@
   color-scheme: light;
 }
 
+html {
+  /* Keep text from auto-resizing on orientation change on mobile. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 html,
 body {
   background-color: #f7f8f7;
   color: #1f2937;
   -webkit-font-smoothing: antialiased;
+}
+
+body {
+  /* Use the dynamic viewport height so mobile browser chrome doesn't clip. */
+  min-height: 100dvh;
+}
+
+/* We provide our own :active feedback, so drop the default grey tap flash. */
+* {
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Subtle tabular numbers for scores */
