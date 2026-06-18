@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background-color: #f7f8f7;
+  color: #1f2937;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle tabular numbers for scores */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
