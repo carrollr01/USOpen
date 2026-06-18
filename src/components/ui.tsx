@@ -33,8 +33,9 @@ function statusLabel(g: ScoredGolfer): string {
       return "Disqualified";
     default:
       if (g.thru === "F") return "Finished";
-      if (g.thru === "—") return g.toPar === null ? "Not started" : "—";
-      return `Thru ${g.thru}`;
+      if (/^\d+$/.test(g.thru)) return `Thru ${g.thru}`;
+      if (g.teeTime) return `Tee ${g.teeTime}`;
+      return "Not started";
   }
 }
 

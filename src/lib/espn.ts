@@ -105,7 +105,7 @@ function parseCompetitor(c: any, round: number | null): EspnGolfer {
   if (isOut) thru = "—";
   else if (holesPlayed >= 18) thru = "F";
   else if (holesPlayed > 0) thru = String(holesPlayed);
-  else thru = teeLabel(rounds) ?? "—";
+  else thru = ""; // not started yet — tee time shown separately
 
   const todayRound = rounds.find((r) => r?.period === round);
   const today = todayRound ? parseToParString(todayRound.displayValue) : null;
@@ -118,7 +118,7 @@ function parseCompetitor(c: any, round: number | null): EspnGolfer {
     positionDisplay: "",
     thru,
     today,
-    teeTime: teeRaw(rounds),
+    teeTime: teeLabel(rounds),
   };
 }
 
@@ -205,16 +205,18 @@ function teeRaw(rounds: any[]): string | null {
   return null;
 }
 
+// ESPN's tee string (e.g. "Thu Jun 18 08:35:00 PDT 2026") already carries the
+// venue-local wall-clock time, so take the clock as-is — no timezone math.
 function teeLabel(rounds: any[]): string | null {
   const raw = teeRaw(rounds);
   if (!raw) return null;
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: "America/New_York",
-  });
+  const m = raw.match(/\b(\d{1,2}):(\d{2}):\d{2}\b/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = ((h + 11) % 12) + 1;
+  return `${h}:${min} ${ampm}`;
 }
 
 function numberOrNull(v: any): number | null {
