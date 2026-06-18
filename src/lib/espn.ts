@@ -1,9 +1,10 @@
 import type { EspnGolfer, EventMeta, GolferStatus } from "./types";
 
-const LEADERBOARD_URL =
-  "https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard";
+// ESPN's public PGA scoreboard. (The /leaderboard and /summary paths 404/502;
+// the scoreboard carries the full field with per-round, per-hole linescores.)
+const SCOREBOARD_URL =
+  "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard";
 
-// ESPN occasionally 403s requests without a browser-like User-Agent.
 const FETCH_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -17,7 +18,6 @@ export interface ParsedLeaderboard {
   fetchedAt: number;
 }
 
-// Small in-memory cache so polling clients don't hammer ESPN.
 const CACHE_TTL_MS = 25_000;
 let cache: ParsedLeaderboard | null = null;
 let inflight: Promise<ParsedLeaderboard> | null = null;
@@ -29,18 +29,14 @@ export async function getLeaderboard(force = false): Promise<ParsedLeaderboard> 
 
   inflight = (async () => {
     try {
-      const res = await fetch(LEADERBOARD_URL, {
-        headers: FETCH_HEADERS,
-        cache: "no-store",
-      });
+      const res = await fetch(SCOREBOARD_URL, { headers: FETCH_HEADERS, cache: "no-store" });
       if (!res.ok) throw new Error(`ESPN responded ${res.status}`);
       const data = await res.json();
       const parsed = parseLeaderboard(data);
       cache = parsed;
       return parsed;
     } catch (err) {
-      // On failure, serve stale cache if we have it.
-      if (cache) return cache;
+      if (cache) return cache; // serve stale on failure
       throw err;
     } finally {
       inflight = null;
@@ -50,17 +46,13 @@ export async function getLeaderboard(force = false): Promise<ParsedLeaderboard> 
   return inflight;
 }
 
-// Fetch the raw JSON (used by the debug route to inspect ESPN's shape).
-export async function getRawLeaderboard(): Promise<unknown> {
-  const res = await fetch(LEADERBOARD_URL, { headers: FETCH_HEADERS, cache: "no-store" });
-  if (!res.ok) throw new Error(`ESPN responded ${res.status}`);
-  return res.json();
-}
+// --- parsing -------------------------------------------------------------
 
 function parseLeaderboard(data: any): ParsedLeaderboard {
   const event = data?.events?.[0];
-  const competition = event?.competitions?.[0];
-  const statusType = competition?.status?.type ?? {};
+  const comp = event?.competitions?.[0];
+  const statusType = comp?.status?.type ?? {};
+  const round = numberOrNull(comp?.status?.period);
 
   const meta: EventMeta | null = event
     ? {
@@ -69,156 +61,162 @@ function parseLeaderboard(data: any): ParsedLeaderboard {
         detail: statusType.detail ?? statusType.shortDetail ?? statusType.description ?? "",
         state: statusType.state ?? "pre",
         completed: Boolean(statusType.completed),
-        round: numberOrNull(competition?.status?.period),
-        cutLine: extractCutLine(event, competition),
+        round,
+        cutLine: null,
       }
     : null;
 
-  const competitors: any[] = competition?.competitors ?? [];
-  const golfers: EspnGolfer[] = competitors.map((c) => parseCompetitor(c, meta?.round ?? null));
+  const competitors: any[] = comp?.competitors ?? [];
+  const golfers = competitors.map((c) => parseCompetitor(c, round));
+  assignPositions(golfers);
 
   return { event: meta, golfers, fetchedAt: Date.now() };
 }
 
 function parseCompetitor(c: any, round: number | null): EspnGolfer {
   const athlete = c?.athlete ?? {};
-  const status = c?.status ?? {};
+  const name: string = athlete.displayName ?? athlete.fullName ?? athlete.shortName ?? "Unknown";
+  const id = String(c?.id ?? athlete?.id ?? name.toLowerCase().replace(/[^a-z]/g, ""));
+  const rawScore = typeof c?.score === "string" ? c.score : c?.score?.displayValue ?? "";
+  const rounds: any[] = Array.isArray(c?.linescores) ? c.linescores : [];
 
-  const toPar = parseScore(c?.score) ?? parseFromStatistics(c?.statistics);
-  const statusKind = classifyStatus(c);
-  const thru = parseThru(status, statusKind);
-  const today = parseToday(c, round);
+  // Total score to par: prefer ESPN's running `score`; fall back to summing rounds.
+  let toPar = parseToParString(rawScore);
+  if (toPar === null) toPar = sumRoundsToPar(rounds);
+
+  const { holesPlayed } = latestActivity(rounds);
+  const completedRounds = rounds.filter((r) => holesIn(r) >= 18).length;
+  const hasWeekendEntry = rounds.some((r) => (r?.period ?? 0) >= 3);
+
+  // Cut / WD / DQ detection.
+  //  1. ESPN may mark the score string "CUT" / "WD" / "DQ" once posted.
+  //  2. Structural: once the weekend (round >= 3) is under way, a golfer who
+  //     finished 36 holes but has no round-3 entry has missed the cut.
+  // (Verified against live data at Friday's cut; logic is centralized here.)
+  let status: GolferStatus = "active";
+  if (/\b(wd|withdr)\b/i.test(rawScore)) status = "wd";
+  else if (/\b(dq|dsq|disq)\b/i.test(rawScore)) status = "dq";
+  else if (/\b(cut|mc)\b/i.test(rawScore)) status = "cut";
+  else if ((round ?? 0) >= 3 && completedRounds >= 2 && !hasWeekendEntry) status = "cut";
+
+  const isOut = status !== "active";
+
+  let thru: string;
+  if (isOut) thru = "—";
+  else if (holesPlayed >= 18) thru = "F";
+  else if (holesPlayed > 0) thru = String(holesPlayed);
+  else thru = teeLabel(rounds) ?? "—";
+
+  const todayRound = rounds.find((r) => r?.period === round);
+  const today = todayRound ? parseToParString(todayRound.displayValue) : null;
 
   return {
-    id: String(c?.id ?? athlete?.id ?? cryptoIshId(athlete?.displayName)),
-    name: athlete?.displayName ?? athlete?.shortName ?? "Unknown",
+    id,
+    name,
     toPar,
-    status: statusKind,
-    positionDisplay:
-      statusKind === "cut"
-        ? "CUT"
-        : status?.position?.displayName ?? (toPar === null ? "—" : ""),
+    status,
+    positionDisplay: "",
     thru,
     today,
-    teeTime: typeof status?.teeTime === "string" ? status.teeTime : null,
+    teeTime: teeRaw(rounds),
   };
 }
 
-// --- score parsing -------------------------------------------------------
+// Rank active, scored golfers; ties share a position ("T5"). Out players get
+// their status label; not-yet-started players get "—".
+function assignPositions(golfers: EspnGolfer[]): void {
+  const ranked = golfers
+    .filter((g) => g.status === "active" && g.toPar !== null)
+    .sort((a, b) => (a.toPar as number) - (b.toPar as number));
 
-function parseScore(v: any): number | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === "number") return v;
-  if (typeof v === "object") {
-    if (typeof v.value === "number") return v.value;
-    if (typeof v.displayValue === "string") return parseToParString(v.displayValue);
+  const posByToPar = new Map<number, number>();
+  ranked.forEach((g, i) => {
+    const tp = g.toPar as number;
+    if (!posByToPar.has(tp)) posByToPar.set(tp, i + 1);
+  });
+  const counts = new Map<number, number>();
+  for (const g of ranked) counts.set(g.toPar as number, (counts.get(g.toPar as number) ?? 0) + 1);
+
+  for (const g of golfers) {
+    if (g.status === "cut") g.positionDisplay = "CUT";
+    else if (g.status === "wd") g.positionDisplay = "WD";
+    else if (g.status === "dq") g.positionDisplay = "DQ";
+    else if (g.toPar === null) g.positionDisplay = "—";
+    else {
+      const pos = posByToPar.get(g.toPar) ?? 0;
+      const tied = (counts.get(g.toPar) ?? 0) > 1;
+      g.positionDisplay = `${tied ? "T" : ""}${pos}`;
+    }
   }
-  if (typeof v === "string") return parseToParString(v);
-  return null;
 }
 
-function parseToParString(s: string): number | null {
+// --- helpers -------------------------------------------------------------
+
+function parseToParString(s: any): number | null {
+  if (typeof s === "number") return Number.isFinite(s) ? s : null;
+  if (typeof s !== "string") return null;
   const t = s.trim().toUpperCase();
-  if (t === "" || t === "--" || t === "-") return null;
-  if (t === "E" || t === "EVEN" || t === "PAR") return 0;
+  if (t === "" || t === "--" || t === "-" || /[A-Z]/.test(t.replace(/^E$/, ""))) {
+    return t === "E" || t === "EVEN" || t === "PAR" ? 0 : null;
+  }
+  if (t === "E") return 0;
   const n = Number(t.replace(/^\+/, ""));
   return Number.isFinite(n) ? n : null;
 }
 
-function parseFromStatistics(stats: any): number | null {
-  if (!Array.isArray(stats)) return null;
-  const wanted = ["scoretopar", "topar", "total", "score"];
-  for (const name of wanted) {
-    const stat = stats.find((s) => String(s?.name ?? "").toLowerCase() === name);
-    if (stat) {
-      if (typeof stat.value === "number") return stat.value;
-      const parsed = parseToParString(String(stat.displayValue ?? ""));
-      if (parsed !== null) return parsed;
+function sumRoundsToPar(rounds: any[]): number | null {
+  let sum = 0;
+  let counted = 0;
+  for (const r of rounds) {
+    const v = parseToParString(r?.displayValue);
+    if (v !== null && holesIn(r) > 0) {
+      sum += v;
+      counted++;
+    }
+  }
+  return counted > 0 ? sum : null;
+}
+
+function holesIn(round: any): number {
+  return Array.isArray(round?.linescores) ? round.linescores.length : 0;
+}
+
+function latestActivity(rounds: any[]): { holesPlayed: number; period: number } {
+  let best = { holesPlayed: 0, period: 0 };
+  for (const r of rounds) {
+    const holes = holesIn(r);
+    const period = r?.period ?? 0;
+    if (holes > 0 && period >= best.period) best = { holesPlayed: holes, period };
+  }
+  return best;
+}
+
+// The per-round statistics carry a tee-time string like "Thu Jun 18 08:35:00 PDT 2026".
+function teeRaw(rounds: any[]): string | null {
+  for (const r of rounds) {
+    const stats = r?.statistics?.categories?.[0]?.stats;
+    if (Array.isArray(stats)) {
+      for (const s of stats) {
+        const dv = s?.displayValue;
+        if (typeof dv === "string" && /\d{1,2}:\d{2}/.test(dv) && /\d{4}/.test(dv)) return dv;
+      }
     }
   }
   return null;
 }
 
-function parseToday(c: any, round: number | null): number | null {
-  const stats = c?.statistics;
-  if (Array.isArray(stats)) {
-    const stat = stats.find((s) => ["today", "rounds"].includes(String(s?.name ?? "").toLowerCase()));
-    if (stat) {
-      if (typeof stat.value === "number") return stat.value;
-      const parsed = parseToParString(String(stat.displayValue ?? ""));
-      if (parsed !== null) return parsed;
-    }
-  }
-  return null;
-}
-
-// --- status / position ---------------------------------------------------
-
-function classifyStatus(c: any): GolferStatus {
-  const candidates: string[] = [];
-  const s = c?.status ?? {};
-  push(candidates, s?.type?.name);
-  push(candidates, s?.type?.description);
-  push(candidates, s?.type?.detail);
-  push(candidates, s?.type?.shortDetail);
-  push(candidates, s?.position?.displayName);
-  push(candidates, s?.displayValue);
-  push(candidates, c?.statusType);
-  const blob = candidates.join(" | ").toLowerCase();
-
-  if (/\bdq\b|disqualif/.test(blob)) return "dq";
-  if (/\bwd\b|withdr/.test(blob)) return "wd";
-  if (/\bcut\b|missed cut|\bmc\b/.test(blob)) return "cut";
-  return "active";
-}
-
-function parseThru(status: any, kind: GolferStatus): string {
-  if (kind === "cut" || kind === "wd" || kind === "dq") return "—";
-  const thru = status?.thru;
-  const completed = Boolean(status?.type?.completed);
-  if (typeof thru === "number") {
-    if (thru >= 18 || (completed && thru === 0)) return "F";
-    if (thru === 0) return status?.teeTime ? formatTee(status.teeTime) : "—";
-    return String(thru);
-  }
-  if (typeof status?.displayThru === "string" && status.displayThru.trim()) {
-    return status.displayThru.trim();
-  }
-  if (completed) return "F";
-  return status?.teeTime ? formatTee(status.teeTime) : "—";
-}
-
-function formatTee(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      timeZone: "America/New_York",
-    });
-  } catch {
-    return "—";
-  }
-}
-
-// --- misc ----------------------------------------------------------------
-
-function extractCutLine(event: any, competition: any): number | null {
-  const candidates = [event?.cutLine, competition?.cutLine, event?.cut?.value];
-  for (const c of candidates) {
-    const n = numberOrNull(c);
-    if (n !== null) return n;
-  }
-  return null;
+function teeLabel(rounds: any[]): string | null {
+  const raw = teeRaw(rounds);
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  });
 }
 
 function numberOrNull(v: any): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-function push(arr: string[], v: any) {
-  if (typeof v === "string" && v.trim()) arr.push(v);
-}
-
-function cryptoIshId(name: string | undefined): string {
-  return (name ?? "unknown").toLowerCase().replace(/[^a-z]/g, "");
 }
