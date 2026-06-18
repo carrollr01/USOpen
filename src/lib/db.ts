@@ -53,30 +53,38 @@ async function init(): Promise<void> {
     )
   `;
 
-  const rows = (await sql`SELECT COUNT(*)::int AS count FROM users`) as { count: number }[];
-  if (rows[0]?.count === 0) {
-    await seed();
-  }
+  await syncRoster();
 }
 
-async function seed(): Promise<void> {
+// Make the database match the roster in code, idempotently:
+//  - inserts new players (e.g. added later) without touching existing ones
+//  - never overwrites a claimed password
+//  - only rewrites a player's picks if they differ from the roster
+async function syncRoster(): Promise<void> {
   const sql = getSql();
   for (const u of ROSTER) {
-    const inserted = (await sql`
+    const rows = (await sql`
       INSERT INTO users (username, display_name)
       VALUES (${u.username}, ${u.displayName})
-      ON CONFLICT (username) DO NOTHING
+      ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name
       RETURNING id
     `) as { id: number }[];
-    if (inserted.length === 0) continue;
-    const userId = inserted[0].id;
-    let slot = 1;
-    for (const golfer of u.golfers) {
-      await sql`
-        INSERT INTO picks (user_id, slot, golfer_name)
-        VALUES (${userId}, ${slot}, ${golfer})
-      `;
-      slot++;
+    const userId = rows[0].id;
+
+    const existing = (await sql`
+      SELECT golfer_name FROM picks WHERE user_id = ${userId} ORDER BY slot
+    `) as { golfer_name: string }[];
+    const current = existing.map((r) => r.golfer_name);
+    const matches =
+      current.length === u.golfers.length && current.every((g, i) => g === u.golfers[i]);
+
+    if (!matches) {
+      await sql`DELETE FROM picks WHERE user_id = ${userId}`;
+      let slot = 1;
+      for (const golfer of u.golfers) {
+        await sql`INSERT INTO picks (user_id, slot, golfer_name) VALUES (${userId}, ${slot}, ${golfer})`;
+        slot++;
+      }
     }
   }
 }

@@ -97,6 +97,18 @@ export const ROSTER: RosterUser[] = [
       "Dustin Johnson",
     ],
   },
+  {
+    username: "matt",
+    displayName: "Matt",
+    golfers: [
+      "Jordan Spieth",
+      "Sepp Straka",
+      "Jason Day",
+      "Cameron Smith",
+      "Cameron Young",
+      "Chris Gotterup",
+    ],
+  },
 ];
 
 // Number of a player's golfers that count toward the team total.

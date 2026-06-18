@@ -53,6 +53,9 @@ const field: EspnGolfer[] = [
   g("Jake Knapp", 5),
   g("Robert MacIntyre", -2),
   g("Dustin Johnson", 1),
+  g("Sepp Straka", -3),
+  g("Cameron Smith", 2),
+  g("Chris Gotterup", -1),
 ];
 
 const users: UserPicks[] = ROSTER.map((r) => ({
