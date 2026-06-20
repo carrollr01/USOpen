@@ -67,19 +67,37 @@ function parseLeaderboard(data: any): ParsedLeaderboard {
     : null;
 
   const competitors: any[] = comp?.competitors ?? [];
-  // The cut is "in effect" once round-3 pairings exist — players who advance get
-  // a round-3 linescore entry. ESPN keeps competition.period at 2 until round 3
-  // actually tees off, so detect the cut from the data, not the round number.
-  const cutInEffect = competitors.some((c) =>
-    (c?.linescores ?? []).some((r: any) => (r?.period ?? 0) >= 3),
-  );
-  const golfers = competitors.map((c) => parseCompetitor(c, round, cutInEffect));
+
+  // The 36-hole cut applies once round 2 is complete (ESPN keeps period at 2,
+  // marking it "post"/completed, until round 3 actually tees off).
+  const cutInEffect =
+    (statusType.state === "post" && (round ?? 0) >= 2) ||
+    (round ?? 0) >= 3 ||
+    competitors.some((c) => roundHasHoles(c, 3));
+
+  // ESPN's scoreboard exposes no cut line, so compute it: low 60 and ties on the
+  // 36-hole scores. (Derived from rounds 1+2 so it stays correct all weekend.)
+  let cutLine: number | null = null;
+  if (cutInEffect) {
+    const scores = competitors
+      .map((c) => thirtySixToPar(c?.linescores ?? []))
+      .filter((v): v is number => v !== null)
+      .sort((a, b) => a - b);
+    if (scores.length >= 60) cutLine = scores[59];
+  }
+
+  const golfers = competitors.map((c) => parseCompetitor(c, round, cutInEffect, cutLine));
   assignPositions(golfers);
 
   return { event: meta, golfers, fetchedAt: Date.now() };
 }
 
-function parseCompetitor(c: any, round: number | null, cutInEffect: boolean): EspnGolfer {
+function parseCompetitor(
+  c: any,
+  round: number | null,
+  cutInEffect: boolean,
+  cutLine: number | null,
+): EspnGolfer {
   const athlete = c?.athlete ?? {};
   const name: string = athlete.displayName ?? athlete.fullName ?? athlete.shortName ?? "Unknown";
   const id = String(c?.id ?? athlete?.id ?? name.toLowerCase().replace(/[^a-z]/g, ""));
@@ -93,20 +111,27 @@ function parseCompetitor(c: any, round: number | null, cutInEffect: boolean): Es
   const { holesPlayed } = latestActivity(rounds);
   const roundsPlayed = rounds.filter((r) => holesIn(r) > 0).length;
   const hasWeekendEntry = rounds.some((r) => (r?.period ?? 0) >= 3);
+  const thirtySix = thirtySixToPar(rounds);
 
-  // Cut / WD / DQ detection (verified against live data at the Friday cut):
-  //  - ESPN may mark the score string "CUT" / "WD" / "DQ".
-  //  - Structurally: once the cut is set, players who advance get a round-3
-  //    linescore entry. A golfer who has played but has no round-3 entry is out.
-  //    ESPN keeps the round number at 2 until round 3 tees off, so we key off
-  //    `cutInEffect` (computed across the whole field), not the round number.
+  // Cut / WD / DQ detection (verified against live data at the Friday cut).
+  // ESPN's scoreboard gives no cut line or status, so:
+  //  - missed cut: 36-hole score worse than the computed low-60-and-ties line.
+  //  - WD/DQ: played but isn't advancing — either didn't finish 36 holes, or made
+  //    the line but has no round-3 tee-time entry (ESPN gives every advancing
+  //    player a round-3 placeholder, so a missing one means they pulled out).
   let status: GolferStatus = "active";
   if (/\b(wd|withdr)\b/i.test(rawScore)) status = "wd";
   else if (/\b(dq|dsq|disq)\b/i.test(rawScore)) status = "dq";
   else if (/\b(cut|mc)\b/i.test(rawScore)) status = "cut";
-  else if (cutInEffect && roundsPlayed >= 1 && !hasWeekendEntry) status = "cut";
+  else if (cutInEffect && cutLine !== null && thirtySix !== null && thirtySix > cutLine) {
+    status = "cut";
+  } else if (cutInEffect && roundsPlayed >= 1 && (thirtySix === null || !hasWeekendEntry)) {
+    status = "wd";
+  }
 
   const isOut = status !== "active";
+  // Freeze an out golfer's score at their 36 holes; +20 is added in scoring.
+  if (isOut && thirtySix !== null) toPar = thirtySix;
 
   let thru: string;
   if (isOut) thru = "—";
@@ -186,6 +211,19 @@ function sumRoundsToPar(rounds: any[]): number | null {
 
 function holesIn(round: any): number {
   return Array.isArray(round?.linescores) ? round.linescores.length : 0;
+}
+
+function roundHasHoles(c: any, period: number): boolean {
+  const r = (c?.linescores ?? []).find((x: any) => x?.period === period);
+  return holesIn(r) > 0;
+}
+
+// 36-hole score to par (rounds 1 + 2), or null if both rounds aren't complete.
+function thirtySixToPar(rounds: any[]): number | null {
+  const v1 = parseToParString(rounds.find((r) => r?.period === 1)?.displayValue);
+  const v2 = parseToParString(rounds.find((r) => r?.period === 2)?.displayValue);
+  if (v1 === null || v2 === null) return null;
+  return v1 + v2;
 }
 
 function latestActivity(rounds: any[]): { holesPlayed: number; period: number } {
