@@ -32,31 +32,30 @@ export async function GET(req: NextRequest) {
   const roundsWithHoles = (c: any) =>
     (c?.linescores ?? []).filter((r: any) => Array.isArray(r?.linescores) && r.linescores.length > 0).length;
 
+  const hasWeekend = (c: any) =>
+    (c?.linescores ?? []).some((r: any) => (r?.period ?? 0) >= 3);
+
   const summarize = (c: any) => ({
     name: c?.athlete?.displayName,
     order: c?.order,
-    competitorKeys: c ? Object.keys(c) : [],
     score: c?.score,
-    status: c?.status ?? null,
-    type: c?.type ?? null,
     roundsWithHoles: roundsWithHoles(c),
+    hasWeekendEntry: hasWeekend(c),
     roundDisplayValues: (c?.linescores ?? []).map((r: any) => r?.displayValue),
   });
 
-  // Players who only played 2 rounds are the cut ones — dump them fully.
-  const cut = competitors
-    .filter((c) => {
-      const r = roundsWithHoles(c);
-      return r > 0 && r <= 2;
-    })
-    .slice(0, 2);
+  // Actual cut players: finished some golf but have NO round-3+ entry.
+  const cut = competitors.filter((c) => roundsWithHoles(c) >= 1 && !hasWeekend(c));
+  const made = competitors.filter((c) => hasWeekend(c));
 
   return NextResponse.json({
     eventName: event?.name,
     competitionStatus: comp?.status,
     competitorCount: competitors.length,
-    winner: competitors.slice(0, 1).map(summarize),
-    cutSummaries: cut.map(summarize),
+    madeCutCount: made.length,
+    cutCount: cut.length,
+    madeCutSample: made.slice(0, 1).map(summarize),
+    cutSummaries: cut.slice(0, 4).map(summarize),
     cutFullSample: cut.slice(0, 1),
   });
 }
