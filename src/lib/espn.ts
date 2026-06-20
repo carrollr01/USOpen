@@ -67,13 +67,19 @@ function parseLeaderboard(data: any): ParsedLeaderboard {
     : null;
 
   const competitors: any[] = comp?.competitors ?? [];
-  const golfers = competitors.map((c) => parseCompetitor(c, round));
+  // The cut is "in effect" once round-3 pairings exist — players who advance get
+  // a round-3 linescore entry. ESPN keeps competition.period at 2 until round 3
+  // actually tees off, so detect the cut from the data, not the round number.
+  const cutInEffect = competitors.some((c) =>
+    (c?.linescores ?? []).some((r: any) => (r?.period ?? 0) >= 3),
+  );
+  const golfers = competitors.map((c) => parseCompetitor(c, round, cutInEffect));
   assignPositions(golfers);
 
   return { event: meta, golfers, fetchedAt: Date.now() };
 }
 
-function parseCompetitor(c: any, round: number | null): EspnGolfer {
+function parseCompetitor(c: any, round: number | null, cutInEffect: boolean): EspnGolfer {
   const athlete = c?.athlete ?? {};
   const name: string = athlete.displayName ?? athlete.fullName ?? athlete.shortName ?? "Unknown";
   const id = String(c?.id ?? athlete?.id ?? name.toLowerCase().replace(/[^a-z]/g, ""));
@@ -85,19 +91,20 @@ function parseCompetitor(c: any, round: number | null): EspnGolfer {
   if (toPar === null) toPar = sumRoundsToPar(rounds);
 
   const { holesPlayed } = latestActivity(rounds);
-  const completedRounds = rounds.filter((r) => holesIn(r) >= 18).length;
+  const roundsPlayed = rounds.filter((r) => holesIn(r) > 0).length;
   const hasWeekendEntry = rounds.some((r) => (r?.period ?? 0) >= 3);
 
-  // Cut / WD / DQ detection.
-  //  1. ESPN may mark the score string "CUT" / "WD" / "DQ" once posted.
-  //  2. Structural: once the weekend (round >= 3) is under way, a golfer who
-  //     finished 36 holes but has no round-3 entry has missed the cut.
-  // (Verified against live data at Friday's cut; logic is centralized here.)
+  // Cut / WD / DQ detection (verified against live data at the Friday cut):
+  //  - ESPN may mark the score string "CUT" / "WD" / "DQ".
+  //  - Structurally: once the cut is set, players who advance get a round-3
+  //    linescore entry. A golfer who has played but has no round-3 entry is out.
+  //    ESPN keeps the round number at 2 until round 3 tees off, so we key off
+  //    `cutInEffect` (computed across the whole field), not the round number.
   let status: GolferStatus = "active";
   if (/\b(wd|withdr)\b/i.test(rawScore)) status = "wd";
   else if (/\b(dq|dsq|disq)\b/i.test(rawScore)) status = "dq";
   else if (/\b(cut|mc)\b/i.test(rawScore)) status = "cut";
-  else if ((round ?? 0) >= 3 && completedRounds >= 2 && !hasWeekendEntry) status = "cut";
+  else if (cutInEffect && roundsPlayed >= 1 && !hasWeekendEntry) status = "cut";
 
   const isOut = status !== "active";
 
